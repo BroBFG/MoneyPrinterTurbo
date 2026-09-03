@@ -486,7 +486,15 @@ def _generate_single_scene(
 
     # Step 3: Get materials for this scene
     if scene.materials:
-        downloaded_videos = [m.url for m in scene.materials if m.url]
+        # Validate local materials through the same path as the standard pipeline
+        processed = video.preprocess_video(
+            materials=scene.materials,
+            clip_duration=params.video_clip_duration,
+        )
+        if not processed:
+            logger.warning(f"scene {scene.scene_id}: no valid local materials after preprocessing")
+            return None
+        downloaded_videos = [m.url for m in processed if m.url]
         logger.info(f"scene {scene.scene_id}: using {len(downloaded_videos)} local materials")
     elif scene.search_terms:
         logger.info(f"scene {scene.scene_id}: downloading materials for {len(scene.search_terms)} terms")
@@ -849,28 +857,7 @@ def get_video_materials(
     video_terms,
     audio_duration,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
-    processed_scenes=None,
 ):
-    # Scene-based material download: each scene has its own materials
-    if processed_scenes:
-        logger.info(f"\n\n## downloading materials for {len(processed_scenes)} scenes")
-        downloaded_videos = material.download_scene_videos(
-            task_id=task_id,
-            scenes=processed_scenes,
-            source=params.video_source,
-            video_aspect=params.video_aspect,
-            max_clip_duration=params.video_clip_duration,
-            total_audio_duration=audio_duration,
-        )
-        if not downloaded_videos:
-            _mark_task_failed(
-                task_id,
-                "materials",
-                "failed to download video materials for scenes",
-            )
-            return None
-        return downloaded_videos
-
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -1703,7 +1690,8 @@ def _run_pipeline(
         #           ...
 
         scene_video_paths = []
-        scene_transitions = [None]  # First scene has no transition INTO it
+        scene_transitions = []
+        scene_warnings = []
         for i, scene in enumerate(processed_scenes):
             scene_index = i + 1
             sm.state.update_task(
@@ -1720,10 +1708,22 @@ def _run_pipeline(
             )
             if scene_video:
                 scene_video_paths.append(scene_video)
-                scene_transitions.append(scene.transition or params.scene_transition)
+                # Scene 1 has no transition INTO it (there's no previous scene).
+                # Scene N (N>1) uses the transition defined on that scene or the
+                # global fallback.
+                if i == 0:
+                    scene_transitions.append(None)
+                else:
+                    scene_transitions.append(
+                        scene.transition or params.scene_transition
+                    )
                 logger.info(f"scene {scene.scene_id}: ready ({scene_video})")
             else:
                 logger.warning(f"scene {scene.scene_id}: generation failed, skipping")
+                scene_warnings.append({
+                    "code": "scene_generation_failed",
+                    "scene_id": scene.scene_id,
+                })
 
         if not scene_video_paths:
             return _mark_task_failed(
@@ -1749,11 +1749,21 @@ def _run_pipeline(
                 utils.task_dir(task_id),
                 f"{params.bgm_type}-bgm{video_music_provider['suffix']}",
             )
+            # Compute total duration from scene videos for BGM providers
+            # that need it (sonilo, elevenlabs).
+            total_scene_duration = 0.0
+            for svp in scene_video_paths:
+                try:
+                    clip = AudioFileClip(svp)
+                    total_scene_duration += clip.duration
+                    clip.close()
+                except Exception:
+                    pass
             try:
                 service.generate_bgm(
-                    video_path=generated_bgm_path,
+                    video_path=scene_video_paths[0],
                     output_path=generated_bgm_path,
-                    video_duration=0,
+                    video_duration=total_scene_duration,
                     prompt=_get_video_music_prompt(params),
                 )
                 bgm_file_override = generated_bgm_path
@@ -1782,7 +1792,7 @@ def _run_pipeline(
         )
 
         final_video_paths = [final_video_path]
-        generation_warnings = []
+        generation_warnings = scene_warnings
         combined_video_paths = []
 
         logger.success(
@@ -1896,6 +1906,16 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
+    # Scene mode handles materials per-scene in _generate_single_scene.
+    # The standard get_video_materials path is not designed for scenes.
+    if processed_scenes:
+        return _mark_task_failed(
+            task_id,
+            "materials",
+            "scene mode does not support stop_at=materials; "
+            "use stop_at=video to generate full scene videos",
+        )
+
     # 5. Get video materials
     downloaded_videos = get_video_materials(
         task_id,
@@ -1903,7 +1923,6 @@ def _run_pipeline(
         video_terms,
         audio_duration,
         loomloom_video_request=loomloom_video_request,
-        processed_scenes=processed_scenes,
     )
     if not downloaded_videos:
         return _mark_task_failed(

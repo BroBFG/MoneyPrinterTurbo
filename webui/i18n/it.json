@@ -391,6 +391,25 @@
     "OFox Upstream Vendor Help": "Quale fornitore upstream serve la generazione video OFox. BytePlus (internazionale) è il predefinito, con una politica dei contenuti coerente; Volcano Engine è il fornitore della Cina continentale; Auto lascia che il gateway OFox bilanci il carico tra i fornitori.",
     "OFox Vendor BytePlus": "BytePlus (internazionale, predefinito)",
     "OFox Vendor Volcengine": "Volcano Engine (Cina continentale)",
-    "OFox Vendor Auto": "Auto (bilanciamento del gateway)"
+    "OFox Vendor Auto": "Auto (bilanciamento del gateway)",
+    "Generation Mode": "Generation Mode",
+    "Generation Mode whole": "Whole Video",
+    "Generation Mode scenes": "Scene-Based",
+    "Generation Mode Help": "Whole Video: one script and keyword set. Scene-Based: each scene has its own script and keywords.",
+    "Scenes": "Scenes",
+    "Scene": "Scene",
+    "Add Scene": "Add Scene",
+    "Remove Scene": "Remove Scene",
+    "Number of Scenes": "Number of Scenes",
+    "Generate Scene Scripts": "Generate Scene Scripts with AI",
+    "Generate Scene Keywords": "Generate Scene Keywords with AI",
+    "Generating Scene Scripts": "AI is generating scene scripts...",
+    "Generating Scene Keywords": "AI is generating scene keywords...",
+    "Generate Scene Scripts and Keywords": "Generate Scene Scripts & Keywords with AI",
+    "Failed to generate scene scripts": "Failed to generate scene scripts. Please try again.",
+    "Failed to generate scene keywords": "Failed to generate scene keywords. Please try again.",
+    "Please Generate Scene Scripts First": "Please generate scene scripts first.",
+    "Scene count adjusted": "AI returned a different number of scenes than requested",
+    "Scene keyword count adjusted": "AI returned keywords for a different number of scenes"
   }
 }
