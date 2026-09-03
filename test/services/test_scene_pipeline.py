@@ -27,6 +27,7 @@ def _mock_clip(duration=10.0):
     return clip
 
 
+import cli
 from app.models.schema import (
     MaterialInfo,
     SceneConfig,
@@ -572,6 +573,121 @@ class TestVideoParamsWithScenes(unittest.TestCase):
             params.scenes[0].clip_transition, VideoTransitionMode.slide_in
         )
         self.assertIsNone(params.scenes[1].clip_transition)
+
+
+class TestCliSceneParsing(unittest.TestCase):
+    """Tests for CLI --scenes and --scenes-file parsing."""
+
+    def test_scenes_from_json_string(self):
+        """Test parsing scenes from --scenes JSON string."""
+        scenes_json = json.dumps([
+            {"scene_id": 1, "script": "Scene 1 text", "search_terms": ["term1"], "duration": 5.0},
+            {"scene_id": 2, "script": "Scene 2 text", "search_terms": ["term2"], "duration": 10.0},
+        ])
+        args = cli.parse_args([
+            "--video-subject", "test",
+            "--scenes", scenes_json,
+        ])
+        params = cli.build_video_params(args)
+
+        self.assertIsNotNone(params.scenes)
+        self.assertEqual(len(params.scenes), 2)
+        self.assertEqual(params.scenes[0].scene_id, 1)
+        self.assertEqual(params.scenes[0].script, "Scene 1 text")
+        self.assertEqual(params.scenes[0].search_terms, ["term1"])
+        self.assertEqual(params.scenes[0].duration, 5.0)
+
+    def test_scenes_auto_assign_id(self):
+        """Test that scene_id is auto-assigned when 0."""
+        scenes_json = json.dumps([
+            {"script": "Scene 1", "duration": 5.0},
+            {"script": "Scene 2", "duration": 10.0},
+        ])
+        args = cli.parse_args([
+            "--video-subject", "test",
+            "--scenes", scenes_json,
+        ])
+        params = cli.build_video_params(args)
+        self.assertEqual(params.scenes[0].scene_id, 1)
+        self.assertEqual(params.scenes[1].scene_id, 2)
+
+    def test_scenes_from_file(self):
+        """Test loading scenes from --scenes-file."""
+        scenes = [
+            {"scene_id": 1, "script": "Scene 1", "duration": 5.0},
+            {"scene_id": 2, "script": "Scene 2", "duration": 10.0},
+        ]
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(scenes, f)
+            scenes_file = f.name
+        try:
+            args = cli.parse_args([
+                "--video-subject", "test",
+                "--scenes-file", scenes_file,
+            ])
+            params = cli.build_video_params(args)
+            self.assertIsNotNone(params.scenes)
+            self.assertEqual(len(params.scenes), 2)
+            self.assertEqual(params.scenes[0].script, "Scene 1")
+        finally:
+            os.unlink(scenes_file)
+
+    def test_scenes_mutually_exclusive_with_scenes_file(self):
+        scenes_json = json.dumps([{"script": "Scene 1"}])
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args([
+                "--video-subject", "test",
+                "--scenes", scenes_json,
+                "--scenes-file", "some_file.json",
+            ])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_scenes_rejected_with_local_source(self):
+        scenes_json = json.dumps([{"script": "Scene 1"}])
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args([
+                "--video-subject", "test",
+                "--video-source", "local",
+                "--video-materials", "a.mp4",
+                "--scenes", scenes_json,
+            ])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_scenes_with_invalid_json(self):
+        args = cli.parse_args([
+            "--video-subject", "test",
+            "--scenes", "not valid json",
+        ])
+        with self.assertRaises(ValueError) as cm:
+            cli.build_video_params(args)
+        self.assertIn("invalid JSON", str(cm.exception))
+
+    def test_scenes_none_when_not_provided(self):
+        args = cli.parse_args(["--video-subject", "test"])
+        params = cli.build_video_params(args)
+        self.assertIsNone(params.scenes)
+
+    def test_scene_transition_cli_option(self):
+        scenes_json = json.dumps([{"script": "Scene 1"}])
+        args = cli.parse_args([
+            "--video-subject", "test",
+            "--scenes", scenes_json,
+            "--scene-transition", "fade-in",
+        ])
+        params = cli.build_video_params(args)
+        self.assertEqual(params.scene_transition, "FadeIn")
+
+    def test_clip_transition_cli_option(self):
+        scenes_json = json.dumps([{"script": "Scene 1"}])
+        args = cli.parse_args([
+            "--video-subject", "test",
+            "--scenes", scenes_json,
+            "--clip-transition", "slide-in",
+        ])
+        params = cli.build_video_params(args)
+        self.assertEqual(params.clip_transition, "SlideIn")
 
 
 class TestApplySceneTransition(unittest.TestCase):
