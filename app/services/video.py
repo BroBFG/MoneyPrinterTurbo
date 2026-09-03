@@ -981,6 +981,16 @@ def concat_scene_videos_with_transitions(
                             clip = video_effects.zoomin_transition(clip, duration)
                         elif transition_value == VideoTransitionMode.zoom_out.value:
                             clip = video_effects.zoomout_transition(clip, duration)
+                        elif transition_value == VideoTransitionMode.shuffle.value:
+                            transition_funcs = [
+                                lambda c: video_effects.fadein_transition(c, duration),
+                                lambda c: video_effects.fadeout_transition(c, duration),
+                                lambda c: video_effects.slidein_transition(c, duration, side),
+                                lambda c: video_effects.slideout_transition(c, duration, side),
+                                lambda c: video_effects.zoomin_transition(c, duration),
+                                lambda c: video_effects.zoomout_transition(c, duration),
+                            ]
+                            clip = random.choice(transition_funcs)(clip)
 
             scene_clips.append(clip)
 
@@ -996,12 +1006,16 @@ def concat_scene_videos_with_transitions(
         final_audio = final_clip.audio
 
         # Overlay BGM if resolved (same pattern as generate_video)
+        # Only loop BGM for random/custom sources — provider-generated BGM
+        # (sonilo/elevenlabs) is already sized to the video duration.
         if bgm_resolved:
             bgm_effects = [
                 afx.MultiplyVolume(bgm_volume),
                 afx.AudioFadeOut(3),
-                afx.AudioLoop(duration=final_clip.duration),
             ]
+            if bgm_file_override is None:
+                # Random/custom BGM may be shorter than the video — loop it
+                bgm_effects.append(afx.AudioLoop(duration=final_clip.duration))
             bgm_source = clip_stack.enter_context(AudioFileClip(bgm_resolved))
             bgm_clip = bgm_source.with_effects(bgm_effects)
             final_audio = CompositeAudioClip([final_audio, bgm_clip])

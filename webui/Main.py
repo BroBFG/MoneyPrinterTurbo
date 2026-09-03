@@ -4452,7 +4452,9 @@ def _build_params_scenes(params):
     if len(scenes) >= 2:
         params.scenes = scenes
         params.scene_transition = params.video_transition_mode
-        params.clip_transition = params.video_transition_mode
+        # Don't override clip_transition — let per-scene or default value apply.
+        # clip_transition controls transitions between clips WITHIN a scene,
+        # which is independent from transitions BETWEEN scenes.
     else:
         params.scenes = None
 
