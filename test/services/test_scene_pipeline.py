@@ -1271,5 +1271,316 @@ class TestConcatBgmExplicitDisable(unittest.TestCase):
         mock_audio.assert_not_called()
 
 
+def _generate_test_video(output_path, duration=2, color="red", size="320x240"):
+    """Generate a short test video using MoviePy."""
+    from moviepy import ColorClip
+    color_map = {"red": (255, 0, 0), "green": (0, 255, 0), "blue": (0, 0, 255)}
+    rgb = color_map.get(color, (128, 128, 128))
+    w, h = (int(x) for x in size.split("x"))
+    clip = ColorClip(size=(w, h), color=rgb, duration=duration)
+    clip.write_videofile(output_path, fps=24, codec="libx264", logger=None)
+    clip.close()
+    return os.path.isfile(output_path)
+
+
+def _generate_test_audio(output_path, duration=3):
+    """Generate a short silent MP3 audio file using ffmpeg."""
+    import subprocess
+    from app.utils import utils
+    ffmpeg = utils.get_ffmpeg_binary()
+    result = subprocess.run(
+        [
+            ffmpeg, "-y", "-f", "lavfi",
+            "-i", "anullsrc=r=44100:cl=mono",
+            "-t", str(duration),
+            "-c:a", "libmp3lame", "-b:a", "64k",
+            output_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and os.path.isfile(output_path)
+
+
+def _write_test_srt(output_path, duration=2):
+    """Write a minimal SRT subtitle file."""
+    content = (
+        "1\n"
+        f"00:00:00,000 --> 00:00:{duration:02d},000\n"
+        "Test subtitle\n"
+        "\n"
+    )
+    Path(output_path).write_text(content, encoding="utf-8")
+
+
+class TestScenePipelineEndToEnd(unittest.TestCase):
+    """End-to-end scene pipeline test with mocked external services.
+
+    Uses real ffmpeg for video/audio processing. Mocks only TTS, LLM,
+    and material download (external APIs). Runs in CI without API keys.
+    """
+
+    def setUp(self):
+        # Use project storage dir for temp files (sandbox-safe)
+        from app.utils import utils
+        self.tmp_dir = utils.storage_dir("test_e2e_clips", create=True)
+        self.task_id = f"e2e-test-{os.getpid()}"
+        # Generate test video clips (2 seconds each, different colors)
+        self.clip1 = os.path.join(self.tmp_dir, "clip1.mp4")
+        self.clip2 = os.path.join(self.tmp_dir, "clip2.mp4")
+        self.clip3 = os.path.join(self.tmp_dir, "clip3.mp4")
+        _generate_test_video(self.clip1, duration=2, color="red")
+        _generate_test_video(self.clip2, duration=2, color="green")
+        _generate_test_video(self.clip3, duration=2, color="blue")
+
+    def tearDown(self):
+        for f in (self.clip1, self.clip2, self.clip3):
+            if os.path.isfile(f):
+                os.remove(f)
+
+    def _make_tts_mock(self, audio_file, duration=3):
+        """Create a mock for voice.tts that generates a real audio file."""
+        def fake_tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0):
+            _generate_test_audio(voice_file, duration=duration)
+            sub_maker = MagicMock()
+            sub_maker.subs = []
+            return sub_maker
+        return fake_tts
+
+    def _make_subtitle_mock(self, subtitle_file, duration=3):
+        """Create a mock for voice.create_subtitle that writes a real SRT."""
+        def fake_create_subtitle(text, sub_maker, subtitle_file):
+            _write_test_srt(subtitle_file, duration=duration)
+        return fake_create_subtitle
+
+    def test_two_scenes_pipeline(self):
+        """Full pipeline: 2 scenes → TTS → materials → combine → concat."""
+        params = VideoParams(
+            video_subject="test",
+            scenes=[
+                SceneConfig(scene_id=1, script="First scene script", search_terms=["nature"]),
+                SceneConfig(scene_id=2, script="Second scene script", search_terms=["city"]),
+            ],
+            video_source="pexels",
+            video_aspect="16:9",
+            video_concat_mode=VideoConcatMode.sequential,
+            video_clip_duration=3,
+            voice_name="test-voice",
+            voice_volume=1.0,
+            voice_rate=1.0,
+            subtitle_enabled=True,
+            bgm_type="none",
+            bgm_volume=0.0,
+            n_threads=2,
+        )
+
+        with patch.object(tm.sm, "state", MagicMock()):
+            with patch.object(tm.voice, "tts", side_effect=self._make_tts_mock("audio.mp3")):
+                with patch.object(tm.voice, "create_subtitle", side_effect=self._make_subtitle_mock("sub.srt")):
+                    with patch.object(
+                        tm.material, "download_videos",
+                        return_value=[self.clip1, self.clip2],
+                    ):
+                        with patch.object(tm.llm, "generate_terms", return_value=["term1"]):
+                            # Process each scene
+                            scene_videos = []
+                            for i, scene in enumerate(params.scenes):
+                                result = tm._generate_single_scene(
+                                    task_id=self.task_id,
+                                    scene=scene,
+                                    params=params,
+                                    scene_index=i + 1,
+                                )
+                                if result:
+                                    scene_videos.append(result)
+
+        self.assertEqual(len(scene_videos), 2, "Both scenes should produce videos")
+        for sv in scene_videos:
+            self.assertTrue(os.path.isfile(sv), f"Scene video should exist: {sv}")
+
+        # Concatenate scenes
+        final_path = os.path.join(self.tmp_dir, "final_e2e.mp4")
+        vd.concat_scene_videos_with_transitions(
+            scene_video_paths=scene_videos,
+            output_file=final_path,
+            scene_transitions=[None, None],
+            bgm_file_override="",
+            bgm_volume=0.0,
+        )
+        self.assertTrue(os.path.isfile(final_path), "Final video should exist")
+
+    def test_three_scenes_with_transitions(self):
+        """3 scenes with fade-in transitions between them."""
+        params = VideoParams(
+            video_subject="test",
+            scenes=[
+                SceneConfig(scene_id=1, script="Scene one"),
+                SceneConfig(scene_id=2, script="Scene two"),
+                SceneConfig(scene_id=3, script="Scene three"),
+            ],
+            video_source="pexels",
+            video_aspect="16:9",
+            video_concat_mode=VideoConcatMode.sequential,
+            video_clip_duration=3,
+            voice_name="test-voice",
+            voice_volume=1.0,
+            voice_rate=1.0,
+            subtitle_enabled=False,
+            bgm_type="none",
+            bgm_volume=0.0,
+            n_threads=2,
+        )
+
+        with patch.object(tm.sm, "state", MagicMock()):
+            with patch.object(tm.voice, "tts", side_effect=self._make_tts_mock("audio.mp3")):
+                with patch.object(
+                    tm.material, "download_videos",
+                    return_value=[self.clip1, self.clip2, self.clip3],
+                ):
+                    with patch.object(tm.llm, "generate_terms", return_value=["term"]):
+                        scene_videos = []
+                        for i, scene in enumerate(params.scenes):
+                            result = tm._generate_single_scene(
+                                task_id=self.task_id,
+                                scene=scene,
+                                params=params,
+                                scene_index=i + 1,
+                            )
+                            if result:
+                                scene_videos.append(result)
+
+        self.assertEqual(len(scene_videos), 3)
+
+        final_path = os.path.join(self.tmp_dir, "final_e2e_transitions.mp4")
+        transitions = [
+            None,
+            VideoTransitionMode.fade_in,
+            VideoTransitionMode.fade_in,
+        ]
+        vd.concat_scene_videos_with_transitions(
+            scene_video_paths=scene_videos,
+            output_file=final_path,
+            scene_transitions=transitions,
+            bgm_file_override="",
+            bgm_volume=0.0,
+        )
+        self.assertTrue(os.path.isfile(final_path))
+
+    def test_scene_failure_skips_and_continues(self):
+        """When one scene fails, the other should still produce output."""
+        params = VideoParams(
+            video_subject="test",
+            scenes=[
+                SceneConfig(scene_id=1, script="Good scene"),
+                SceneConfig(scene_id=2, script=""),  # Empty script → fails
+            ],
+            video_source="pexels",
+            video_aspect="16:9",
+            video_concat_mode=VideoConcatMode.sequential,
+            voice_name="test-voice",
+            voice_volume=1.0,
+            voice_rate=1.0,
+            subtitle_enabled=False,
+            bgm_type="none",
+            bgm_volume=0.0,
+            n_threads=2,
+        )
+
+        with patch.object(tm.sm, "state", MagicMock()):
+            with patch.object(tm.voice, "tts", side_effect=self._make_tts_mock("audio.mp3")):
+                with patch.object(
+                    tm.material, "download_videos",
+                    return_value=[self.clip1],
+                ):
+                    with patch.object(tm.llm, "generate_terms", return_value=["term"]):
+                        scene_videos = []
+                        for i, scene in enumerate(params.scenes):
+                            result = tm._generate_single_scene(
+                                task_id=self.task_id,
+                                scene=scene,
+                                params=params,
+                                scene_index=i + 1,
+                            )
+                            scene_videos.append(result)
+
+        # Scene 1 succeeds, scene 2 fails (empty script)
+        self.assertIsNotNone(scene_videos[0])
+        self.assertIsNone(scene_videos[1])
+
+        # Only the successful scene should be in final paths
+        valid = [v for v in scene_videos if v]
+        self.assertEqual(len(valid), 1)
+
+
+RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() in {
+    "1", "true", "yes",
+}
+
+
+class TestScenePipelineIntegration(unittest.TestCase):
+    """Full integration test with real TTS and ffmpeg.
+
+    Skipped in CI. Run locally with:
+        MPT_RUN_INTEGRATION_TESTS=1 python -m unittest test.services.test_scene_pipeline.TestScenePipelineIntegration
+    """
+
+    @unittest.skipUnless(
+        RUN_INTEGRATION_TESTS,
+        "MPT_RUN_INTEGRATION_TESTS not set",
+    )
+    def test_scene_pipeline_with_local_materials(self):
+        """Full scene pipeline: real TTS + local PNG materials + real ffmpeg."""
+        resources_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
+        task_id = f"scene-integration-{os.getpid()}"
+
+        # Build scene materials from PNG images (same as test_task_local_materials)
+        scene1_materials = [
+            MaterialInfo(provider="local", url=os.path.join(resources_dir, "1.png")),
+            MaterialInfo(provider="local", url=os.path.join(resources_dir, "2.png")),
+        ]
+        scene2_materials = [
+            MaterialInfo(provider="local", url=os.path.join(resources_dir, "3.png")),
+            MaterialInfo(provider="local", url=os.path.join(resources_dir, "4.png")),
+        ]
+
+        params = VideoParams(
+            video_subject="The importance of money",
+            scenes=[
+                SceneConfig(
+                    scene_id=1,
+                    script="Money is not just a medium of exchange. It is a tool for allocating social resources.",
+                    materials=scene1_materials,
+                ),
+                SceneConfig(
+                    scene_id=2,
+                    script="However, money has its limits. It cannot directly buy happiness or genuine relationships.",
+                    materials=scene2_materials,
+                ),
+            ],
+            video_aspect="9:16",
+            video_concat_mode=VideoConcatMode.sequential,
+            video_clip_duration=3,
+            video_source="local",
+            voice_name="zh-CN-XiaoxiaoNeural-Female",
+            voice_volume=1.0,
+            voice_rate=1.0,
+            bgm_type="random",
+            bgm_volume=0.2,
+            subtitle_enabled=True,
+            subtitle_position="bottom",
+            font_name="MicrosoftYaHeiBold.ttc",
+            text_fore_color="#FFFFFF",
+            text_background_color=True,
+            font_size=60,
+            stroke_color="#000000",
+            stroke_width=1.5,
+            n_threads=2,
+        )
+
+        result = tm.start(task_id=task_id, params=params)
+        print(f"Integration test result: {result}")
+        self.assertNotEqual(result.get("state"), "failed", f"Task failed: {result.get('error')}")
+
+
 if __name__ == "__main__":
     unittest.main()
